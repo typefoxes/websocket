@@ -48,8 +48,8 @@ public final class ExtWSClient: @unchecked Sendable {
     public var onBinary: (@Sendable (Data) -> Void)?
     public var onConnect: (@Sendable () -> Void)?
     public var onDisconnect: (@Sendable (_ code: URLSessionWebSocketTask.CloseCode?, _ error: Error?) -> Void)?
-    public var beforeConnect: (@Sendable (_ request: inout URLRequest) async -> Void)?
-    public var onUpgradeError: (@Sendable (HTTPURLResponse) async -> Bool)?
+    public var beforeConnect: (@Sendable (_ request: URLRequest) async -> URLRequest)?
+    public var onUpgradeError: (@Sendable (HTTPURLResponse) -> Void)?
     public var onFrame: (@Sendable (Frame) -> Void)?
     public var onMessage: (@Sendable (_ payload: String) -> Void)?
     public var logger: LoggerProtocol = Logger()
@@ -78,9 +78,9 @@ public final class ExtWSClient: @unchecked Sendable {
     private var sendQueue: [String] = []
     private var pathMonitor: NWPathMonitor?
     private var isNetworkAvailable = true
-    #if DEBUG
+#if DEBUG
     private var testNetworkOverride: Bool?
-    #endif
+#endif
 
     private var pingTimer: DispatchSourceTimer?
 
@@ -174,11 +174,11 @@ public final class ExtWSClient: @unchecked Sendable {
 
     // MARK: - Connection lifecycle
     private func openNow() {
-        #if DEBUG
+#if DEBUG
         let netUp = testNetworkOverride ?? isNetworkAvailable
-        #else
+#else
         let netUp = isNetworkAvailable
-        #endif
+#endif
         guard netUp else {
             state = .waitingNetwork
             logger.warning("WS waiting network")
@@ -188,7 +188,6 @@ public final class ExtWSClient: @unchecked Sendable {
 
         cancelReconnectTimer()
         connectNonce &+= 1
-        let attempt = connectNonce
 
         state = .connecting
 
@@ -196,11 +195,17 @@ public final class ExtWSClient: @unchecked Sendable {
 
         if let bc = beforeConnect {
             let sem = DispatchSemaphore(value: 0)
-            Task { await bc(&req); sem.signal() }
+            Task {
+                let modified = await bc(req)
+                req = modified
+                sem.signal()
+            }
             sem.wait()
         }
 
-        logger.info("WS открыт → \(req.url?.absoluteString ?? "") [n=\(attempt)]")
+        logConnectRequest(req)
+
+        logger.info("WS открыт → \(req.url?.absoluteString ?? "")")
         transport.connect(request: req)
     }
 
@@ -220,7 +225,6 @@ public final class ExtWSClient: @unchecked Sendable {
             let client = self
             let payload = text
             let q = self.queue
-
             q.async { [client] in
                 client.handleIncoming(text: payload)
             }
@@ -238,15 +242,15 @@ public final class ExtWSClient: @unchecked Sendable {
             }
         }
 
-        transport.onClose = { [weak self] code, _, error in
+        transport.onClose = { [weak self] code, reason, error in
             guard let self else { return }
             let client = self
             let c = code
+            let r = reason
             let e = error
             let q = self.queue
-
             q.async { [client] in
-                client.setupOnClose(code: c, error: e)
+                client.setupOnClose(code: c, reason: r, error: e)
             }
         }
     }
@@ -261,42 +265,34 @@ public final class ExtWSClient: @unchecked Sendable {
         cancelReconnectTimer()
     }
 
-    private func setupOnClose(code: URLSessionWebSocketTask.CloseCode?, error: Error?) {
+    private func setupOnClose(code: URLSessionWebSocketTask.CloseCode?, reason: Data?, error: Error?) {
         invalidatePingTimer()
         state = .closed
         onDisconnect?(code, error)
 
-        // Обработка 401 апгрейда
+        // спец. случай 401 на апгрейде - как было
         if let nsErr = error as NSError?,
            let http = nsErr.userInfo[ExtWSErrorKey.httpResponse] as? HTTPURLResponse,
            http.statusCode == 401 {
-
             if let hook = onUpgradeError {
-                var handled = false
-                let sem = DispatchSemaphore(value: 0)
-                Task { handled = await hook(http); sem.signal() }
-                sem.wait()
-
-                if handled {
-                    logger.warning("WS ошибка 401 обработана клиентом — ожидаем переподключения")
-                    return
-                }
+                logger.error("WS ошибка 401 пробуем переподключение")
+                hook(http)
+                return
             }
-
-            logger.error("WS ошибка 401 не обработана — будет переподключение")
         }
 
-        // Игнорируем cancelled/not connected от вытесненных задач
+        // отменённое — игнорируем (как было)
         let ns = error as NSError?
         let isCancelled = (ns?.domain == NSURLErrorDomain && ns?.code == NSURLErrorCancelled)
-            || (ns?.localizedDescription.lowercased().contains("cancelled") == true)
-
+        || (ns?.localizedDescription.lowercased().contains("cancelled") == true)
         if isCancelled {
             logger.info("WS закрыт (отменен) - игнорируем")
             return
         }
 
-        logger.warning("WS закрыт с кодом: \(String(describing: code)), ошибка: \(String(describing: ns?.localizedDescription))")
+        // НОВОЕ: человекочитаемый формат
+        let pretty = formatClose(code: code, reason: reason, error: error)
+        logger.warning("WS закрыт \(pretty)")
 
         if shouldStayConnected {
             scheduleReconnect()
@@ -309,21 +305,21 @@ public final class ExtWSClient: @unchecked Sendable {
         let frame = classify(text)
 
         switch frame.type {
-            case .ping:
-                handlePing(frame)
-                return
-            case .pong:
-                handlePong(frame)
-                return
-            case .timeout:
-                handleTimeout(frame)
-                onFrame?(frame)
-                onMessage?(text)
-            case .message:
-                onMessage?(frame.payload)
-                onFrame?(frame)
-            case .error, .unknown:
-                onFrame?(frame)
+        case .ping:
+            handlePing(frame)
+            return
+        case .pong:
+            handlePong(frame)
+            return
+        case .timeout:
+            handleTimeout(frame)
+            onFrame?(frame)
+            onMessage?(text)
+        case .message:
+            onMessage?(frame.payload)
+            onFrame?(frame)
+        case .error, .unknown:
+            onFrame?(frame)
         }
 
         // По умолчанию — пробрасываем в onText без payload-логов
@@ -356,12 +352,15 @@ public final class ExtWSClient: @unchecked Sendable {
 
     private func flushQueue() {
         guard !sendQueue.isEmpty else { return }
-        let batch = sendQueue; sendQueue.removeAll()
+        let batch = sendQueue
+        sendQueue.removeAll()
 
         for msg in batch {
             transport.send(text: msg) { [weak self] error in
                 if let error {
                     self?.logger.error("Ошибка отправки очереди: \(error.localizedDescription)")
+                } else {
+                    self?.logger.info("Отправки из очереди \(msg)")
                 }
             }
         }
@@ -465,7 +464,7 @@ public final class ExtWSClient: @unchecked Sendable {
         let center = NotificationCenter.default
 
         center.addObserver(
-            forName: UIApplication.willResignActiveNotification,
+            forName: UIApplication.didEnterBackgroundNotification,
             object: nil,
             queue: nil
         ) { [weak self] _ in
@@ -482,7 +481,7 @@ public final class ExtWSClient: @unchecked Sendable {
         }
 
         center.addObserver(
-            forName: UIApplication.didBecomeActiveNotification,
+            forName: UIApplication.willEnterForegroundNotification,
             object: nil,
             queue: nil
         ) { [weak self] _ in
@@ -603,3 +602,94 @@ extension ExtWSClient {
 }
 #endif
 
+// MARK: - Sensitive logging helpers
+
+private extension ExtWSClient {
+
+    func logConnectRequest(_ req: URLRequest) {
+        let headers: [String:String] = req.allHTTPHeaderFields ?? [:]
+        let cookieHeader = headers["Cookie"] ?? ""
+        let hasWebToken = cookieHeader.contains("web_token=")
+        if hasWebToken {
+            logger.info("WS подключается с Webtoken")
+        } else {
+            logger.info("WS подключается БЕЗ Webtoken")
+        }
+    }
+
+    func codeHint(_ code: URLSessionWebSocketTask.CloseCode) -> String {
+        switch code {
+        case .normalClosure:
+            return "нормальное закрытие"
+        case .goingAway:
+            return "узел закрывает соединение "
+        case .protocolError:
+            return "протокольная ошибка"
+        case .unsupportedData:
+            return "неподдерживаемые данные"
+        case .noStatusReceived:
+            return "статус не получен"
+        case .abnormalClosure:
+            return "ненормальное закрытие (обрыв)"
+        case .invalidFramePayloadData:
+            return "битый payload"
+        case .policyViolation:
+            return "нарушение политики"
+        case .messageTooBig:
+            return "слишком большое сообщение"
+        case .mandatoryExtensionMissing:
+            return "нет обязательного расширения"
+        case .internalServerError:
+            return "ошибка сервера"
+        case .tlsHandshakeFailure:
+            return "ошибка TLS рукопожатия"
+        case .invalid:
+            return "какие то параметры или данные неверны"
+        @unknown default:
+            return "неизвестный код"
+        }
+    }
+
+    func decodeReason(_ data: Data?) -> String? {
+        guard let data, !data.isEmpty else { return nil }
+
+        if let s = String(data: data, encoding: .utf8), !s.isEmpty {
+            return s.count > 200 ? String(s.prefix(200)) + "…" : s
+        }
+
+        return data.map { String(format: "%02hhx", $0) }.joined()
+    }
+
+    func describeError(_ error: Error) -> String {
+        if let urlErr = error as? URLError {
+            return "URLError(\(urlErr.code.rawValue)) \(urlErr.code)"
+        }
+
+        let ns = error as NSError
+        var s = "\(ns.domain)#\(ns.code): \(ns.localizedDescription)"
+        if ns.domain == NSPOSIXErrorDomain, ns.code == 57 { s += " [ENOTCONN]" }
+        return s
+    }
+
+    func formatClose(code: URLSessionWebSocketTask.CloseCode?, reason: Data?, error: Error?) -> String {
+        var parts: [String] = []
+
+        if let code {
+            parts.append("code:\(code.rawValue)(\(code.humanLabel)) — \(codeHint(code))")
+        } else {
+            parts.append("")
+        }
+
+        if let r = decodeReason(reason) { parts.append("reason: \(r)") }
+
+        if let error {
+            parts.append("error: \(describeError(error))")
+
+            if let http = (error as NSError).userInfo[ExtWSErrorKey.httpResponse] as? HTTPURLResponse {
+                parts.append("http=\(http.statusCode)")
+            }
+        }
+
+        return parts.joined(separator: " | ")
+    }
+}

@@ -63,7 +63,7 @@ final class ExtWSClientTests: XCTestCase {
         ws.onConnect = { openExp.fulfill() }
 
         ws.connect()
-        ws.connect() // вторая попытка должна быть проигнорирована
+        ws.connect()
 
         await fulfillment(of: [openExp], timeout: 1.0)
         let snapshot = await states.snapshot()
@@ -73,21 +73,26 @@ final class ExtWSClientTests: XCTestCase {
 
     func testBeforeConnectHeadersApplied() async {
         let (ws, fake) = makeWS()
+
         ws.beforeConnect = { req in
+            var req = req
             var h = req.allHTTPHeaderFields ?? [:]
             h["Cookie"] = "__m1_trust=ios:token; web_token=abc"
             req.allHTTPHeaderFields = h
+            return req
         }
+
         let exp = expectation(description: "open")
         ws.onConnect = { exp.fulfill() }
         ws.connect()
+
         await fulfillment(of: [exp], timeout: 1.0)
-        XCTAssertEqual(fake.lastRequest?.allHTTPHeaderFields?["Cookie"], "__m1_trust=ios:token; web_token=abc")
+        XCTAssertEqual(fake.lastRequest?.allHTTPHeaderFields?["Cookie"],
+                       "__m1_trust=ios:token; web_token=abc")
     }
 
     func testQueueFlushedAfterOpen() async {
         let (ws, fake) = makeWS()
-        // отправляем ДО connect — должно попасть в очередь
         let payload = #"4api["im.sync",{"id_last":-1}]"#
         ws.send(payload)
 
@@ -107,7 +112,7 @@ final class ExtWSClientTests: XCTestCase {
         await fulfillment(of: [exp], timeout: 1.0)
 
         ws.send("4ping{}")
-        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertTrue(fake.sentTexts.contains("4ping{}"))
     }
 
@@ -121,7 +126,6 @@ final class ExtWSClientTests: XCTestCase {
         ws.connect()
         await fulfillment(of: [exp], timeout: 1.0)
 
-        // сервер прислал PING "2"
         fake.serverPush("2")
         try? await Task.sleep(nanoseconds: 50_000_000)
 
@@ -139,7 +143,6 @@ final class ExtWSClientTests: XCTestCase {
         ws.connect()
         await fulfillment(of: [exp], timeout: 1.0)
 
-        // сервер прислал PONG "3"
         fake.serverPush("3")
         try? await Task.sleep(nanoseconds: 50_000_000)
 
@@ -148,16 +151,14 @@ final class ExtWSClientTests: XCTestCase {
     }
 
     func testTimeoutInitSchedulesPingFromIdle() async {
-        let (ws, fake) = makeWS(pingInterval: nil) // интервал возьмём из INIT
+        let (ws, fake) = makeWS(pingInterval: nil)
         let exp = expectation(description: "open")
         ws.onConnect = { exp.fulfill() }
         ws.connect()
         await fulfillment(of: [exp], timeout: 1.0)
 
-        // сервер прислал INIT/timeout: idle_timeout=6 → клиентский ping каждые max(1, 6-5)=1 сек
         fake.serverPush(#"1{"id":"abc","idle_timeout":6}"#)
 
-        // ждём чуть больше 1 секунды, чтобы поймать отправку "2"
         try? await Task.sleep(nanoseconds: 1_200_000_000)
         XCTAssertTrue(fake.sentTexts.contains(where: { $0 == "2" }), "ожидали автоматический клиентский PING '2' после INIT")
     }
@@ -173,7 +174,6 @@ final class ExtWSClientTests: XCTestCase {
         ws.connect()
         await fulfillment(of: [exp], timeout: 1.0)
 
-        // сервер прислал "4events{...}" (как в протоколе)
         let raw = #"4events{"foo":1}"#
         fake.serverPush(raw)
         try? await Task.sleep(nanoseconds: 50_000_000)
@@ -215,13 +215,12 @@ final class ExtWSClientTests: XCTestCase {
     }
 
     func testUpdateClientPingIntervalSchedulesTimer() async {
-        let (ws, fake) = makeWS(pingInterval: nil) // начально нет таймера
+        let (ws, fake) = makeWS(pingInterval: nil)
         let open = expectation(description: "open")
         ws.onConnect = { open.fulfill() }
         ws.connect()
         await fulfillment(of: [open], timeout: 1.0)
 
-        // включаем таймер на 0.1с
         ws.updateClientPingInterval(0.1)
         try? await Task.sleep(nanoseconds: 150_000_000) // 0.15s
         XCTAssertTrue(fake.sentTexts.contains("2"), "ожидали PING от таймера после updateClientPingInterval")
@@ -230,14 +229,12 @@ final class ExtWSClientTests: XCTestCase {
     func testOpenWaitsWhenNetworkDown() async {
         let (ws, fake) = makeWS()
 
-        // Жёстко фиксируем сеть вниз, синхронно
         ws.__test_overrideNetwork(up: false)
 
         let states = StatesBox()
         ws.onStateChange = { s in Task { await states.append(s) } }
         ws.connect()
 
-        // даём очереди обработать состояние
         try? await Task.sleep(nanoseconds: 50_000_000)
 
         let snapshot = await states.snapshot()

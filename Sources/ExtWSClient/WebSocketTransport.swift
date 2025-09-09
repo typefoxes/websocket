@@ -150,6 +150,12 @@ public final class URLSessionWSTransport: NSObject, WebSocketTransport, @uncheck
 
     // MARK: - Receive loop (bound to specific task)
 
+    private func deliverClose(_ code: URLSessionWebSocketTask.CloseCode?, _ reason: Data?, _ error: Error?) {
+        guard self.task != nil else { return }
+        self.task = nil
+        self.onClose?(code, reason, error)
+    }
+
     private func receiveLoop(task: URLSessionWebSocketTask) {
         task.receive { [weak self] result in
             guard let self else { return }
@@ -159,7 +165,7 @@ public final class URLSessionWSTransport: NSObject, WebSocketTransport, @uncheck
 
                     self.queue.async {
                         guard task == self.task else { return }
-                        self.onClose?(nil, nil, error)
+                        self.deliverClose(nil, nil, error)
                     }
                 case .success(let message):
                     self.queue.async {
@@ -195,7 +201,7 @@ extension URLSessionWSTransport: URLSessionWebSocketDelegate {
     public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith code: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         queue.async {
             if webSocketTask == self.task {
-                self.onClose?(code, reason, nil)
+                self.deliverClose(code, reason, nil)
             }
         }
     }
@@ -215,7 +221,7 @@ extension URLSessionWSTransport: URLSessionTaskDelegate {
 
         queue.async {
             if task == self.task {
-                self.onClose?(nil, nil, wrapped)
+                self.deliverClose(nil, nil, wrapped)
             }
         }
     }
