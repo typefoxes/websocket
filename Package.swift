@@ -14,15 +14,9 @@ let package = Package(
             name: "ExtWSClient",
             targets: ["ExtWSClient"]),
     ],
-    dependencies: [
-        .package(url: "https://github.com/apple/swift-log", from: "1.6.4"),
-    ],
     targets: [
         .target(
-            name: "ExtWSClient",
-            dependencies: [
-                .product(name: "Logging", package: "swift-log")
-            ]),
+            name: "ExtWSClient"),
         .testTarget(
             name: "ExtWSClientTests",
             dependencies: ["ExtWSClient"]

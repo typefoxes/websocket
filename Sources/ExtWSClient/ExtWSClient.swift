@@ -8,7 +8,6 @@
 import Foundation
 import Network
 import UIKit
-import Logging
 
 // MARK: - Error UserInfo Keys
 
@@ -53,12 +52,12 @@ public final class ExtWSClient: @unchecked Sendable {
     public var onUpgradeError: (@Sendable (HTTPURLResponse) -> Void)?
     public var onFrame: (@Sendable (Frame) -> Void)?
     public var onMessage: (@Sendable (_ payload: String) -> Void)?
+    public var logger: LoggerProtocol = Logger()
 
     // MARK: - Configuration & Transport
 
     private let config: ExtWSConfig
     private let transport: WebSocketTransport
-    private var logger: Logger
 
     // MARK: - Serial queue
 
@@ -101,15 +100,10 @@ public final class ExtWSClient: @unchecked Sendable {
 
     // MARK: - Init
 
-    public init(
-        config: ExtWSConfig,
-        transport: WebSocketTransport = URLSessionWSTransport(),
-        logger: Logger = Logger(label: "ExtWSClient")
-    ) {
+    public init(config: ExtWSConfig, transport: WebSocketTransport = URLSessionWSTransport()) {
         self.config = config
         self.transport = transport
         self.backoff = config.initialBackoff
-        self.logger = logger
 
         setupTransportCallbacks()
         setupReachability()
@@ -193,6 +187,7 @@ public final class ExtWSClient: @unchecked Sendable {
         guard !isConnectingOrOpen else { return }
         cancelReconnectTimer()
         connectNonce &+= 1
+        let attempt = connectNonce
 
         state = .connecting
 
@@ -304,7 +299,7 @@ public final class ExtWSClient: @unchecked Sendable {
         || (ns?.localizedDescription.lowercased().contains("cancelled") == true)
 
         if isCancelled {
-            logger.info("WS закрыт - игнорируем")
+            logger.info("WS закрыт (отменен) - игнорируем")
             return
         }
 
@@ -360,7 +355,7 @@ public final class ExtWSClient: @unchecked Sendable {
     private func handleTimeout(_ frame: Frame) {
         if let idle = extractIdleTimeoutSeconds(from: frame.payload) {
             let interval = max(1.0, Double(idle) - 5.0)
-            logger.notice("WS установил idle-лог \(idle)сек → client ping \(Int(interval))сек")
+            logger.warning("WS установил idle-лог \(idle)сек → client ping \(Int(interval))сек")
             schedulePingIfNeeded(interval: interval)
         } else {
             logger.warning("WS инициализируется без idle-логов")
@@ -400,6 +395,7 @@ public final class ExtWSClient: @unchecked Sendable {
             guard let self else { return }
             guard self.shouldStayConnected, nonce == self.connectNonce else { return }
             self.backoff = min(self.backoff * 2, self.config.maxBackoff)
+            logger.warning("WS openNow")
             self.openNow()
         }
 
@@ -490,6 +486,7 @@ public final class ExtWSClient: @unchecked Sendable {
 
             self.queue.async {
                 guard self.config.suspendOnBackground else { return }
+                self.logger.info("Приложение ушло в фон")
                 self.shouldStayConnected = false
                 self.cancelReconnectTimer()
                 self.transport.close(code: .goingAway, reason: nil)
@@ -506,6 +503,8 @@ public final class ExtWSClient: @unchecked Sendable {
 
             self.queue.async {
                 guard self.config.suspendOnBackground else { return }
+
+                self.logger.info("Приложение вернулось из фона")
                 self.shouldStayConnected = true
 
                 if !self.isConnectingOrOpen && self.isNetworkAvailable {
@@ -581,7 +580,7 @@ extension ExtWSClient {
             let was = self.isNetworkAvailable
             self.isNetworkAvailable = up
             if was != up {
-                self.logger.debug("Network \(up ? "up" : "down") [TEST]")
+                self.logger.info("Network \(up ? "up" : "down") [TEST]")
 
                 if up, self.shouldStayConnected, !(self.state == .open || self.state == .connecting) {
                     self.backoff = self.config.initialBackoff
@@ -609,7 +608,7 @@ extension ExtWSClient {
                     self.state = .waitingNetwork
                 }
             } else if prev != nil {
-                logger.debug("Network override cleared [TEST]")
+                logger.info("Network override cleared [TEST]")
             }
         }
     }
@@ -621,14 +620,14 @@ extension ExtWSClient {
 private extension ExtWSClient {
 
     func logConnectRequest(_ req: URLRequest) {
-        let headers: [String:String] = req.allHTTPHeaderFields ?? [:]
+        var headers: [String:String] = req.allHTTPHeaderFields ?? [:]
         let cookieHeader = headers["Cookie"] ?? ""
         let hasWebToken = cookieHeader.contains("web_token=")
 
         if hasWebToken {
-            logger.notice("WS подключается с Webtoken")
+            logger.info("WS подключается с Webtoken")
         } else {
-            logger.notice("WS подключается БЕЗ Webtoken")
+            logger.info("WS подключается БЕЗ Webtoken")
         }
     }
 
