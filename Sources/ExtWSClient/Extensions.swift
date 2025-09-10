@@ -25,20 +25,33 @@ extension MainActor {
 extension URLSessionWebSocketTask.CloseCode {
     var humanLabel: String {
         switch self {
-        case .normalClosure: return "normalClosure"
-        case .goingAway: return "goingAway"
-        case .protocolError: return "protocolError"
-        case .unsupportedData: return "unsupportedData"
-        case .noStatusReceived: return "noStatus"
-        case .abnormalClosure: return "abnormal"
-        case .invalidFramePayloadData: return "invalidPayload"
-        case .policyViolation: return "policyViolation"
-        case .messageTooBig: return "messageTooBig"
-        case .mandatoryExtensionMissing: return "extensionMissing"
-        case .internalServerError: return "serverError"
-        case .tlsHandshakeFailure: return "tlsHandshake"
-        case .invalid: return "invalid"
-        @unknown default: return "unknown"
+            case .normalClosure:
+                return "normalClosure"
+            case .goingAway:
+                return "goingAway"
+            case .protocolError:
+                return "protocolError"
+            case .unsupportedData:
+                return "unsupportedData"
+            case .noStatusReceived:
+                return "noStatus"
+            case .abnormalClosure:
+                return "abnormal"
+            case .invalidFramePayloadData:
+                return "invalidPayload"
+            case .policyViolation:
+                return "policyViolation"
+            case .messageTooBig:
+                return "messageTooBig"
+            case .mandatoryExtensionMissing:
+                return "extensionMissing"
+            case .internalServerError:
+                return "serverError"
+            case .tlsHandshakeFailure:
+                return "tlsHandshake"
+            case .invalid:
+                return "invalid"
+            @unknown default: return "unknown"
         }
     }
 }

@@ -153,7 +153,6 @@ public final class ExtWSClient: @unchecked Sendable {
                 }
             } else {
                 self.sendQueue.append(text)
-                self.logger.info("WS отправка очереди (статус: \(self.state))")
             }
         }
     }
@@ -184,10 +183,11 @@ public final class ExtWSClient: @unchecked Sendable {
             logger.warning("WS waiting network")
             return
         }
-        guard !isConnectingOrOpen else { return }
 
+        guard !isConnectingOrOpen else { return }
         cancelReconnectTimer()
         connectNonce &+= 1
+        let attempt = connectNonce
 
         state = .connecting
 
@@ -195,17 +195,29 @@ public final class ExtWSClient: @unchecked Sendable {
 
         if let bc = beforeConnect {
             let sem = DispatchSemaphore(value: 0)
+            var modified = req
+
             Task {
-                let modified = await bc(req)
-                req = modified
+                modified = await bc(req)
                 sem.signal()
             }
-            sem.wait()
+
+            let timeout: DispatchTime = .now() + .seconds(8)
+
+            if sem.wait(timeout: timeout) == .timedOut {
+                logger.warning("beforeConnect timeout — отменяем попытку и попробуем позже")
+                state = .closed
+                    if shouldStayConnected {
+                        scheduleReconnect()
+                    }
+
+                return
+            }
+
+            req = modified
         }
 
         logConnectRequest(req)
-
-        logger.info("WS открыт → \(req.url?.absoluteString ?? "")")
         transport.connect(request: req)
     }
 
@@ -237,7 +249,6 @@ public final class ExtWSClient: @unchecked Sendable {
             let q = self.queue
 
             q.async { [client] in
-                client.logger.info("WS RX binary \(bytes.count) bytes")
                 client.onBinary?(bytes)
             }
         }
@@ -249,6 +260,7 @@ public final class ExtWSClient: @unchecked Sendable {
             let r = reason
             let e = error
             let q = self.queue
+
             q.async { [client] in
                 client.setupOnClose(code: c, reason: r, error: e)
             }
@@ -267,13 +279,14 @@ public final class ExtWSClient: @unchecked Sendable {
 
     private func setupOnClose(code: URLSessionWebSocketTask.CloseCode?, reason: Data?, error: Error?) {
         invalidatePingTimer()
+
         state = .closed
         onDisconnect?(code, error)
 
-        // спец. случай 401 на апгрейде - как было
         if let nsErr = error as NSError?,
            let http = nsErr.userInfo[ExtWSErrorKey.httpResponse] as? HTTPURLResponse,
-           http.statusCode == 401 {
+
+            http.statusCode == 401 {
             if let hook = onUpgradeError {
                 logger.error("WS ошибка 401 пробуем переподключение")
                 hook(http)
@@ -281,16 +294,15 @@ public final class ExtWSClient: @unchecked Sendable {
             }
         }
 
-        // отменённое — игнорируем (как было)
         let ns = error as NSError?
         let isCancelled = (ns?.domain == NSURLErrorDomain && ns?.code == NSURLErrorCancelled)
         || (ns?.localizedDescription.lowercased().contains("cancelled") == true)
+
         if isCancelled {
             logger.info("WS закрыт (отменен) - игнорируем")
             return
         }
 
-        // НОВОЕ: человекочитаемый формат
         let pretty = formatClose(code: code, reason: reason, error: error)
         logger.warning("WS закрыт \(pretty)")
 
@@ -305,29 +317,31 @@ public final class ExtWSClient: @unchecked Sendable {
         let frame = classify(text)
 
         switch frame.type {
-        case .ping:
-            handlePing(frame)
-            return
-        case .pong:
-            handlePong(frame)
-            return
-        case .timeout:
-            handleTimeout(frame)
-            onFrame?(frame)
-            onMessage?(text)
-        case .message:
-            onMessage?(frame.payload)
-            onFrame?(frame)
-        case .error, .unknown:
-            onFrame?(frame)
+            case .ping:
+                handlePing(frame)
+                return
+            case .pong:
+                handlePong(frame)
+                return
+            case .timeout:
+                handleTimeout(frame)
+                onFrame?(frame)
+                onMessage?(text)
+            case .message:
+                onMessage?(frame.payload)
+                onFrame?(frame)
+            case .error, .unknown:
+                onFrame?(frame)
         }
 
-        // По умолчанию — пробрасываем в onText без payload-логов
         onText?(text)
     }
 
     private func handlePing(_ frame: Frame) {
-        if config.pingPong.enabled && config.pingPong.autoReplyServerPing, case .open = state {
+        if
+            config.pingPong.enabled && config.pingPong.autoReplyServerPing,
+            case .open = state {
+
             transport.send(text: config.pingPong.pongFrame) { _ in }
         }
 
@@ -359,8 +373,6 @@ public final class ExtWSClient: @unchecked Sendable {
             transport.send(text: msg) { [weak self] error in
                 if let error {
                     self?.logger.error("Ошибка отправки очереди: \(error.localizedDescription)")
-                } else {
-                    self?.logger.info("Отправки из очереди \(msg)")
                 }
             }
         }
@@ -383,6 +395,7 @@ public final class ExtWSClient: @unchecked Sendable {
             guard let self else { return }
             guard self.shouldStayConnected, nonce == self.connectNonce else { return }
             self.backoff = min(self.backoff * 2, self.config.maxBackoff)
+            logger.warning("WS openNow")
             self.openNow()
         }
 
@@ -404,9 +417,9 @@ public final class ExtWSClient: @unchecked Sendable {
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + interval, repeating: interval)
+
         timer.setEventHandler { [weak self] in
-            guard let self else { return }
-            guard case .open = self.state else { return }
+            guard let self, case .open = self.state else { return }
             self.transport.send(text: self.config.pingPong.pingFrame) { _ in }
         }
 
@@ -607,9 +620,10 @@ extension ExtWSClient {
 private extension ExtWSClient {
 
     func logConnectRequest(_ req: URLRequest) {
-        let headers: [String:String] = req.allHTTPHeaderFields ?? [:]
+        var headers: [String:String] = req.allHTTPHeaderFields ?? [:]
         let cookieHeader = headers["Cookie"] ?? ""
         let hasWebToken = cookieHeader.contains("web_token=")
+
         if hasWebToken {
             logger.info("WS подключается с Webtoken")
         } else {
@@ -619,34 +633,34 @@ private extension ExtWSClient {
 
     func codeHint(_ code: URLSessionWebSocketTask.CloseCode) -> String {
         switch code {
-        case .normalClosure:
-            return "нормальное закрытие"
-        case .goingAway:
-            return "узел закрывает соединение "
-        case .protocolError:
-            return "протокольная ошибка"
-        case .unsupportedData:
-            return "неподдерживаемые данные"
-        case .noStatusReceived:
-            return "статус не получен"
-        case .abnormalClosure:
-            return "ненормальное закрытие (обрыв)"
-        case .invalidFramePayloadData:
-            return "битый payload"
-        case .policyViolation:
-            return "нарушение политики"
-        case .messageTooBig:
-            return "слишком большое сообщение"
-        case .mandatoryExtensionMissing:
-            return "нет обязательного расширения"
-        case .internalServerError:
-            return "ошибка сервера"
-        case .tlsHandshakeFailure:
-            return "ошибка TLS рукопожатия"
-        case .invalid:
-            return "какие то параметры или данные неверны"
+            case .normalClosure:
+                return "нормальное закрытие"
+            case .goingAway:
+                return "узел закрывает соединение "
+            case .protocolError:
+                return "протокольная ошибка"
+            case .unsupportedData:
+                return "неподдерживаемые данные"
+            case .noStatusReceived:
+                return "статус не получен"
+            case .abnormalClosure:
+                return "ненормальное закрытие (обрыв)"
+            case .invalidFramePayloadData:
+                return "битый payload"
+            case .policyViolation:
+                return "нарушение политики"
+            case .messageTooBig:
+                return "слишком большое сообщение"
+            case .mandatoryExtensionMissing:
+                return "нет обязательного расширения"
+            case .internalServerError:
+                return "ошибка сервера"
+            case .tlsHandshakeFailure:
+                return "ошибка TLS рукопожатия"
+            case .invalid:
+                return "invalid"
         @unknown default:
-            return "неизвестный код"
+                return "неизвестный код"
         }
     }
 

@@ -109,6 +109,7 @@ public final class URLSessionWSTransport: NSObject, WebSocketTransport, @uncheck
 
     private var task: URLSessionWebSocketTask?
     private let queue = DispatchQueue(label: "extws.transport")
+    private var handshakeTimer: DispatchSourceTimer?
 
     public var onOpen: (() -> Void)?
     public var onClose: ((URLSessionWebSocketTask.CloseCode?, Data?, Error?) -> Void)?
@@ -117,11 +118,15 @@ public final class URLSessionWSTransport: NSObject, WebSocketTransport, @uncheck
 
     public func connect(request: URLRequest) {
         queue.async {
-            // отменяем старую, создаём новую
-            self.task?.cancel()
+            let old = self.task
+            self.task = nil
+            self.cancelHandshakeWatchdog()
+            old?.cancel()
+
             let t = self.session.webSocketTask(with: request)
             self.task = t
             t.resume()
+            self.startHandshakeWatchdog(for: t, seconds: 10)
             self.receiveLoop(task: t)
         }
     }
@@ -141,7 +146,6 @@ public final class URLSessionWSTransport: NSObject, WebSocketTransport, @uncheck
         }
     }
 
-
     public func close(code: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         queue.async {
             self.task?.cancel(with: code, reason: reason)
@@ -150,10 +154,27 @@ public final class URLSessionWSTransport: NSObject, WebSocketTransport, @uncheck
 
     // MARK: - Receive loop (bound to specific task)
 
-    private func deliverClose(_ code: URLSessionWebSocketTask.CloseCode?, _ reason: Data?, _ error: Error?) {
-        guard self.task != nil else { return }
-        self.task = nil
-        self.onClose?(code, reason, error)
+    private func startHandshakeWatchdog(for task: URLSessionWebSocketTask, seconds: Int) {
+        cancelHandshakeWatchdog()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + .seconds(seconds))
+
+        timer.setEventHandler { [weak self] in
+            guard let self, task == self.task else { return }
+            let err = URLError(.timedOut)
+            self.onClose?(nil, nil, err)
+            task.cancel(with: .goingAway, reason: nil)
+            self.cancelHandshakeWatchdog()
+        }
+
+        timer.resume()
+        handshakeTimer = timer
+    }
+
+    private func cancelHandshakeWatchdog() {
+        handshakeTimer?.setEventHandler(handler: nil)
+        handshakeTimer?.cancel()
+        handshakeTimer = nil
     }
 
     private func receiveLoop(task: URLSessionWebSocketTask) {
@@ -161,12 +182,14 @@ public final class URLSessionWSTransport: NSObject, WebSocketTransport, @uncheck
             guard let self else { return }
 
             switch result {
-                case .failure(let error):
 
+                case .failure(let error):
                     self.queue.async {
                         guard task == self.task else { return }
-                        self.deliverClose(nil, nil, error)
+                        self.cancelHandshakeWatchdog()
+                        self.onClose?(nil, nil, error)
                     }
+
                 case .success(let message):
                     self.queue.async {
                         guard task == self.task else { return }
@@ -187,18 +210,41 @@ public final class URLSessionWSTransport: NSObject, WebSocketTransport, @uncheck
             }
         }
     }
+
+    private func deliverClose(
+        _ code: URLSessionWebSocketTask.CloseCode?,
+        _ reason: Data?,
+        _ error: Error?
+    ) {
+        guard self.task != nil else { return }
+        self.task = nil
+        self.cancelHandshakeWatchdog()
+        self.onClose?(code, reason, error)
+    }
 }
 
 // MARK: - URLSessionWebSocketDelegate
+
 extension URLSessionWSTransport: URLSessionWebSocketDelegate {
-    public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol _: String?) {
+    public func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didOpenWithProtocol _: String?
+    ) {
         queue.async {
-            if webSocketTask == self.task { self.onOpen?()
+            if webSocketTask == self.task {
+                self.cancelHandshakeWatchdog()
+                self.onOpen?()
             }
         }
     }
 
-    public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith code: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+    public func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didCloseWith code: URLSessionWebSocketTask.CloseCode,
+        reason: Data?
+    ) {
         queue.async {
             if webSocketTask == self.task {
                 self.deliverClose(code, reason, nil)
@@ -209,7 +255,12 @@ extension URLSessionWSTransport: URLSessionWebSocketDelegate {
 
 // MARK: - URLSessionTaskDelegate
 extension URLSessionWSTransport: URLSessionTaskDelegate {
-    public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+
+    public func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
         guard let error else { return }
         var userInfo = (error as NSError).userInfo
 
@@ -217,7 +268,11 @@ extension URLSessionWSTransport: URLSessionTaskDelegate {
             userInfo[ExtWSErrorKey.httpResponse] = http
         }
 
-        let wrapped = NSError(domain: (error as NSError).domain, code: (error as NSError).code, userInfo: userInfo)
+        let wrapped = NSError(
+            domain: (error as NSError).domain,
+            code: (error as NSError).code,
+            userInfo: userInfo
+        )
 
         queue.async {
             if task == self.task {
