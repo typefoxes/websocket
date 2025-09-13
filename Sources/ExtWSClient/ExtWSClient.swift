@@ -91,7 +91,7 @@ public final class ExtWSClient: @unchecked Sendable {
 
     private var isConnectingOrOpen: Bool {
         switch state {
-            case .connecting, .open, .retrying, .waitingNetwork:
+            case .connecting, .open, .retrying:
                 return true
             default:
                 return false
