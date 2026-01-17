@@ -38,14 +38,14 @@ public enum FrameType: Int, Sendable {
 ///   - `raw`: Исходная строка, полученная из WebSocket.
 public struct Frame: Sendable {
     /// Тип фрейма (ping, pong, message и т.д.).
-    public let type: FrameType
+     let type: FrameType
 
     /// Полезная нагрузка (часть после ведущего идентификатора типа).
     ///- Note: Может быть пустой строкой.
-    public let payload: String
+     let payload: String
 
     /// Исходная строка, пришедшая по WebSocket.
-    public let raw: String
+     let raw: String
 }
 
 // MARK: - ExtWSConfig
@@ -55,25 +55,25 @@ public struct Frame: Sendable {
 public struct ExtWSConfig: Sendable {
 
     /// URL для подключения (формируется заранее, query/headers/куки добавляются в `beforeConnect`).
-    public var url: URL
+     var url: URL
 
     ///  Имя модуля для логирования.
-    public var moduleName: String
+     var moduleName: String
 
     /// Конфигурация ping/pong-кадров (`PingPongConfig`).
-    public var pingPong: PingPongConfig
+     var pingPong: PingPongConfig
 
     /// Начальная задержка перед переподключением.
-    public var initialBackoff: TimeInterval
+     var initialBackoff: TimeInterval
 
     /// Максимальная задержка между попытками переподключения.
-    public var maxBackoff: TimeInterval
+     var maxBackoff: TimeInterval
 
     /// При `true` соединение будет отключаться в фоне и возобновляться при возврате.
-    public var suspendOnBackground: Bool
+     var suspendOnBackground: Bool
 
     /// Ограничение размера полезной нагрузки в логах (nil = не усекать).
-    public var logTrimLimit: Int?
+     var logTrimLimit: Int?
 
     /// Инициализатор с параметрами по умолчанию.
     ///
@@ -91,8 +91,7 @@ public struct ExtWSConfig: Sendable {
         pingPong: PingPongConfig = PingPongConfig(),
         initialBackoff: TimeInterval = 1.0,
         maxBackoff: TimeInterval = 30.0,
-        suspendOnBackground: Bool = true,
-        logTrimLimit: Int? = 512
+        suspendOnBackground: Bool = true
     ) {
         self.url = url
         self.moduleName = moduleName
@@ -100,7 +99,6 @@ public struct ExtWSConfig: Sendable {
         self.initialBackoff = initialBackoff
         self.maxBackoff = maxBackoff
         self.suspendOnBackground = suspendOnBackground
-        self.logTrimLimit = logTrimLimit
     }
 }
 
@@ -112,22 +110,22 @@ public struct ExtWSConfig: Sendable {
 public struct PingPongConfig: Sendable {
 
     /// Включить поддержку ping/pong внутри WebSocket.
-    public var enabled: Bool
+     var enabled: Bool
 
     /// Строковый кадр для пинга (по умолчанию "2").
-    public var pingFrame: String
+     var pingFrame: String
 
     ///  Строковый кадр для понга (по умолчанию "3").
-    public var pongFrame: String
+     var pongFrame: String
 
     /// Интервал проактивных PING со стороны клиента (nil = не слать).
-    public var clientPingInterval: TimeInterval?
+     var clientPingInterval: TimeInterval?
 
     /// Автоматически отвечать PONG на входящий PING.
-    public var autoReplyServerPing: Bool
+     var autoReplyServerPing: Bool
 
     /// Подавлять проксирование кадров "2"/"3" в `onText`
-    public var suppressForwardingToOnText: Bool
+     var suppressForwardingToOnText: Bool
 
     /// Инициализатор с параметрами по умолчанию.
     ///

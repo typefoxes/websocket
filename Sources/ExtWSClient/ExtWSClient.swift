@@ -12,9 +12,9 @@ import UIKit
 // MARK: - Error UserInfo Keys
 
 /// Ключи для расширения `NSError.userInfo`, используемые клиентом ExtWS.
-public enum ExtWSErrorKey {
+ enum ExtWSErrorKey {
     /// Ключ для хранения `HTTPURLResponse` в `userInfo` ошибки апгрейда/рукопожатия.
-    public static let httpResponse = "extws.httpResponse"
+     static let httpResponse = "extws.httpResponse"
 }
 
 // MARK: - ExtWSClient
@@ -41,7 +41,7 @@ public enum ExtWSErrorKey {
 ///   автопереподключение не запускается.
 public final class ExtWSClient: @unchecked Sendable {
 
-    // MARK: - Callbacks (public)
+    // MARK: - Callbacks ()
 
     public var onStateChange: (@Sendable (ExtWSState) -> Void)?
     public var onText: (@Sendable (String) -> Void)?
@@ -57,7 +57,6 @@ public final class ExtWSClient: @unchecked Sendable {
 
     private let config: ExtWSConfig
     private let transport: WebSocketTransport
-    private let logger: LogHandler?
 
     // MARK: - Serial queue
 
@@ -76,12 +75,6 @@ public final class ExtWSClient: @unchecked Sendable {
     private var shouldStayConnected = false
     private var backoff: TimeInterval
     private var sendQueue: [String] = []
-    private var pathMonitor: NWPathMonitor?
-    private var isNetworkAvailable = true
-#if DEBUG
-    private var testNetworkOverride: Bool?
-#endif
-
     private var pingTimer: DispatchSourceTimer?
 
     // MARK: - Reconnect control
@@ -100,34 +93,23 @@ public final class ExtWSClient: @unchecked Sendable {
 
     // MARK: - Init
 
-    public init(
-        config: ExtWSConfig,
-        transport: WebSocketTransport = URLSessionWSTransport(),
-        logHandler: LogHandler? = nil
-    ) {
-        self.config = config
-        self.transport = transport
+    public init(url: URL) {
+        self.config = ExtWSConfig(url: url)
+        self.transport = URLSessionWSTransport()
         self.backoff = config.initialBackoff
-        self.logger = logHandler
 
         setupTransportCallbacks()
-        setupReachability()
-        setupLifecycle()
     }
 
     deinit {
-        stopReachability()
         invalidatePingTimer()
         cancelReconnectTimer()
     }
 
-    // MARK: - Public API
+    // MARK: -  API
     public func connect() {
         queue.async {
-            self.logger?(LibLogEvent(level: .info, message: "WS запрошено подключение (текущий статус: \(self.state))"))
-
             guard !self.isConnectingOrOpen else {
-                self.logger?(LibLogEvent(level: .info, message: "WS подключение проигнорировано (текущий статус: \(self.state))"))
                 self.shouldStayConnected = true
                 return
             }
@@ -139,7 +121,6 @@ public final class ExtWSClient: @unchecked Sendable {
 
     public func disconnect() {
         queue.async {
-            self.logger?(LibLogEvent(level: .info, message: "WS запрошено отключение"))
             self.shouldStayConnected = false
             self.cancelReconnectTimer()
             self.connectNonce &+= 1
@@ -151,9 +132,9 @@ public final class ExtWSClient: @unchecked Sendable {
     public func send(_ text: String) {
         queue.async {
             if case .open = self.state {
-                self.transport.send(text: text) { [weak self] error in
+                self.transport.send(text: text) { error in
                     if let error {
-                        self?.logger?(LibLogEvent(level: .error, message: "WS ошибка отправки: \(error.localizedDescription)"))
+                        debugPrint("WS ошибка отправки: \(error.localizedDescription)")
                     }
                 }
             } else {
@@ -177,22 +158,11 @@ public final class ExtWSClient: @unchecked Sendable {
     }
 
     // MARK: - Connection lifecycle
-    private func openNow() {
-#if DEBUG
-        let netUp = testNetworkOverride ?? isNetworkAvailable
-#else
-        let netUp = isNetworkAvailable
-#endif
-        guard netUp else {
-            state = .waitingNetwork
-            self.logger?(LibLogEvent(level: .warning, message:"WS waiting network"))
-            return
-        }
 
+    private func openNow() {
         guard !isConnectingOrOpen else { return }
         cancelReconnectTimer()
         connectNonce &+= 1
-        let attempt = connectNonce
 
         state = .connecting
 
@@ -210,7 +180,6 @@ public final class ExtWSClient: @unchecked Sendable {
             let timeout: DispatchTime = .now() + .seconds(8)
 
             if sem.wait(timeout: timeout) == .timedOut {
-                logger?(LibLogEvent(level: .warning, message: "beforeConnect timeout — отменяем попытку и попробуем позже"))
                 state = .closed
                     if shouldStayConnected {
                         scheduleReconnect()
@@ -222,7 +191,6 @@ public final class ExtWSClient: @unchecked Sendable {
             req = modified
         }
 
-        logConnectRequest(req)
         transport.connect(request: req)
     }
 
@@ -275,7 +243,6 @@ public final class ExtWSClient: @unchecked Sendable {
     private func setupOnOpen() {
         state = .open
         backoff = config.initialBackoff
-        logger?(LibLogEvent(level: .info, message: "WS успешно открыт ✓"))
         onConnect?()
         flushQueue()
         schedulePingIfNeeded(interval: config.pingPong.clientPingInterval)
@@ -293,7 +260,6 @@ public final class ExtWSClient: @unchecked Sendable {
 
             http.statusCode == 401 {
             if let hook = onUpgradeError {
-                logger?(LibLogEvent(level: .error, message: "WS ошибка 401 пробуем переподключение"))
                 hook(http)
                 return
             }
@@ -303,13 +269,7 @@ public final class ExtWSClient: @unchecked Sendable {
         let isCancelled = (ns?.domain == NSURLErrorDomain && ns?.code == NSURLErrorCancelled)
         || (ns?.localizedDescription.lowercased().contains("cancelled") == true)
 
-        if isCancelled {
-            logger?(LibLogEvent(level: .info, message: "WS закрыт (отменен) - игнорируем"))
-            return
-        }
-
-        let pretty = formatClose(code: code, reason: reason, error: error)
-        logger?(LibLogEvent(level: .warning, message: "WS закрыт \(pretty)"))
+        if isCancelled { return }
 
         if shouldStayConnected {
             scheduleReconnect()
@@ -360,10 +320,7 @@ public final class ExtWSClient: @unchecked Sendable {
     private func handleTimeout(_ frame: Frame) {
         if let idle = extractIdleTimeoutSeconds(from: frame.payload) {
             let interval = max(1.0, Double(idle) - 5.0)
-            logger?(LibLogEvent(level: .warning, message: "WS установил idle-лог \(idle)сек → client ping \(Int(interval))сек"))
             schedulePingIfNeeded(interval: interval)
-        } else {
-            logger?(LibLogEvent(level: .warning, message: "WS инициализируется без idle-логов"))
         }
     }
 
@@ -375,9 +332,9 @@ public final class ExtWSClient: @unchecked Sendable {
         sendQueue.removeAll()
 
         for msg in batch {
-            transport.send(text: msg) { [weak self] error in
+            transport.send(text: msg) { error in
                 if let error {
-                    self?.logger?(LibLogEvent(level: .error, message: "Ошибка отправки очереди: \(error.localizedDescription)"))
+                 debugPrint("Ошибка отправки очереди: \(error.localizedDescription)")
                 }
             }
         }
@@ -390,7 +347,6 @@ public final class ExtWSClient: @unchecked Sendable {
         let jitter = Double.random(in: 0...(backoff / 2))
         let delay = min(backoff + jitter, config.maxBackoff)
         state = .retrying(after: delay)
-        logger?(LibLogEvent(level: .warning, message: "WS переподключится через \(String(format: "%.2f", delay))сек..."))
 
         let nonce = connectNonce
         let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -400,7 +356,6 @@ public final class ExtWSClient: @unchecked Sendable {
             guard let self else { return }
             guard self.shouldStayConnected, nonce == self.connectNonce else { return }
             self.backoff = min(self.backoff * 2, self.config.maxBackoff)
-            logger?(LibLogEvent(level: .warning, message: "WS openNow"))
             self.openNow()
         }
 
@@ -438,88 +393,6 @@ public final class ExtWSClient: @unchecked Sendable {
         pingTimer = nil
     }
 
-    // MARK: - Reachability / Lifecycle
-
-    private func setupReachability() {
-        let monitor = NWPathMonitor()
-
-        monitor.pathUpdateHandler = { [weak self] path in
-            guard let self else { return }
-            self.queue.async {
-
-#if DEBUG
-                if self.testNetworkOverride != nil { return }
-#endif
-
-                let up = (path.status == .satisfied)
-
-                if up != self.isNetworkAvailable {
-                    self.isNetworkAvailable = up
-                    self.logger?(LibLogEvent(level: .info, message: "Сеть: \(up ? "↑" : "↓")"))
-
-                    if
-                        up,
-                        self.shouldStayConnected,
-                        !self.isConnectingOrOpen
-                    {
-                        self.backoff = self.config.initialBackoff
-                        self.openNow()
-                    }
-                }
-            }
-        }
-
-        monitor.start(queue: DispatchQueue(label: "extws.reach"))
-        pathMonitor = monitor
-    }
-
-    private func stopReachability() {
-        pathMonitor?.cancel()
-        pathMonitor = nil
-    }
-
-    private func setupLifecycle() {
-        let center = NotificationCenter.default
-
-        center.addObserver(
-            forName: UIApplication.didEnterBackgroundNotification,
-            object: nil,
-            queue: nil
-        ) { [weak self] _ in
-
-            guard let self else { return }
-
-            self.queue.async {
-                guard self.config.suspendOnBackground else { return }
-                self.logger?(LibLogEvent(level: .info, message: "Приложение ушло в фон"))
-                self.shouldStayConnected = false
-                self.cancelReconnectTimer()
-                self.transport.close(code: .goingAway, reason: nil)
-            }
-        }
-
-        center.addObserver(
-            forName: UIApplication.willEnterForegroundNotification,
-            object: nil,
-            queue: nil
-        ) { [weak self] _ in
-
-            guard let self else { return }
-
-            self.queue.async {
-                guard self.config.suspendOnBackground else { return }
-
-                self.logger?(LibLogEvent(level: .info, message: "Приложение вернулось из фона"))
-                self.shouldStayConnected = true
-
-                if !self.isConnectingOrOpen && self.isNetworkAvailable {
-                    self.backoff = self.config.initialBackoff
-                    self.openNow()
-                }
-            }
-        }
-    }
-
     // MARK: - Helpers
 
     @inline(__always)
@@ -538,7 +411,8 @@ public final class ExtWSClient: @unchecked Sendable {
             return Frame(type: .pong, payload: "", raw: text)
         }
 
-        var idx = trimmed.startIndex; var numStr = ""
+        var idx = trimmed.startIndex
+        var numStr = ""
 
         if trimmed.first == "-" {
             numStr.append("-")
@@ -570,144 +444,5 @@ public final class ExtWSClient: @unchecked Sendable {
         }
 
         return nil
-    }
-}
-
-#if DEBUG
-// MARK: - Testing Utilities (DEBUG)
-
-extension ExtWSClient {
-
-    /// Тестовая имитация оповещения об изменении сети.
-    public func __test_setNetwork(up: Bool) {
-        queue.async {
-            let was = self.isNetworkAvailable
-            self.isNetworkAvailable = up
-            if was != up {
-                self.logger?(LibLogEvent(level: .debug, message: "Network \(up ? "up" : "down") [TEST]"))
-
-                if up, self.shouldStayConnected, !(self.state == .open || self.state == .connecting) {
-                    self.backoff = self.config.initialBackoff
-                    self.openNow()
-                }
-            }
-        }
-    }
-
-    /// Синхронный (по внутренней очереди) оверрайд статуса сети.
-    /// - Parameter up: true/false — зафиксировать статус; nil — снять оверрайд.
-    public func __test_overrideNetwork(up: Bool?) {
-        queue.sync {
-            let prev = self.testNetworkOverride
-            self.testNetworkOverride = up
-
-            if let up = up {
-                self.isNetworkAvailable = up
-                logger?(LibLogEvent(level: .debug, message: "Network \(up ? "up" : "down") [TEST OVERRIDE]"))
-
-                if up, self.shouldStayConnected, !(self.state == .open || self.state == .connecting) {
-                    self.backoff = self.config.initialBackoff
-                    self.openNow()
-                } else if !up, self.state == .connecting {
-                    self.state = .waitingNetwork
-                }
-            } else if prev != nil {
-                logger?(LibLogEvent(level: .debug, message: "Network override cleared [TEST]"))
-            }
-        }
-    }
-}
-#endif
-
-// MARK: - Sensitive logging helpers
-
-private extension ExtWSClient {
-
-    func logConnectRequest(_ req: URLRequest) {
-        var headers: [String:String] = req.allHTTPHeaderFields ?? [:]
-        let cookieHeader = headers["Cookie"] ?? ""
-        let hasWebToken = cookieHeader.contains("web_token=")
-
-        if hasWebToken {
-            logger?(LibLogEvent(level: .warning, message: "WS подключается с Webtoken"))
-        } else {
-            logger?(LibLogEvent(level: .warning, message: "WS подключается БЕЗ Webtoken"))
-        }
-    }
-
-    func codeHint(_ code: URLSessionWebSocketTask.CloseCode) -> String {
-        switch code {
-            case .normalClosure:
-                return "нормальное закрытие"
-            case .goingAway:
-                return "узел закрывает соединение "
-            case .protocolError:
-                return "протокольная ошибка"
-            case .unsupportedData:
-                return "неподдерживаемые данные"
-            case .noStatusReceived:
-                return "статус не получен"
-            case .abnormalClosure:
-                return "ненормальное закрытие (обрыв)"
-            case .invalidFramePayloadData:
-                return "битый payload"
-            case .policyViolation:
-                return "нарушение политики"
-            case .messageTooBig:
-                return "слишком большое сообщение"
-            case .mandatoryExtensionMissing:
-                return "нет обязательного расширения"
-            case .internalServerError:
-                return "ошибка сервера"
-            case .tlsHandshakeFailure:
-                return "ошибка TLS рукопожатия"
-            case .invalid:
-                return "invalid"
-            @unknown default:
-                return "неизвестный код"
-        }
-    }
-
-    func decodeReason(_ data: Data?) -> String? {
-        guard let data, !data.isEmpty else { return nil }
-
-        if let s = String(data: data, encoding: .utf8), !s.isEmpty {
-            return s.count > 200 ? String(s.prefix(200)) + "…" : s
-        }
-
-        return data.map { String(format: "%02hhx", $0) }.joined()
-    }
-
-    func describeError(_ error: Error) -> String {
-        if let urlErr = error as? URLError {
-            return "URLError(\(urlErr.code.rawValue)) \(urlErr.code)"
-        }
-
-        let ns = error as NSError
-        var s = "\(ns.domain)#\(ns.code): \(ns.localizedDescription)"
-        if ns.domain == NSPOSIXErrorDomain, ns.code == 57 { s += " [ENOTCONN]" }
-        return s
-    }
-
-    func formatClose(code: URLSessionWebSocketTask.CloseCode?, reason: Data?, error: Error?) -> String {
-        var parts: [String] = []
-
-        if let code {
-            parts.append("code:\(code.rawValue)(\(code.humanLabel)) — \(codeHint(code))")
-        } else {
-            parts.append("")
-        }
-
-        if let r = decodeReason(reason) { parts.append("reason: \(r)") }
-
-        if let error {
-            parts.append("error: \(describeError(error))")
-
-            if let http = (error as NSError).userInfo[ExtWSErrorKey.httpResponse] as? HTTPURLResponse {
-                parts.append("http=\(http.statusCode)")
-            }
-        }
-
-        return parts.joined(separator: " | ")
     }
 }
