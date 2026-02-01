@@ -9,6 +9,57 @@ import Foundation
 import Network
 import UIKit
 
+// MARK: - ExtWSClientProtocol
+
+/// Протокол публичного API WebSocket-клиента для удобства моков и DI.
+public protocol ExtWSClientProtocol: AnyObject, Sendable {
+
+    /// Колбэк изменения состояния клиента.
+    var onStateChange: (@Sendable (ExtWSState) -> Void)? { get set }
+
+    /// Колбэк получения текстового сообщения.
+    var onText: (@Sendable (String) -> Void)? { get set }
+
+    /// Колбэк получения бинарного сообщения.
+    var onBinary: (@Sendable (Data) -> Void)? { get set }
+
+    /// Колбэк успешного подключения.
+    var onConnect: (@Sendable () -> Void)? { get set }
+
+    /// Колбэк отключения с кодом закрытия и ошибкой.
+    var onDisconnect: (@Sendable (_ code: URLSessionWebSocketTask.CloseCode?, _ error: Error?) -> Void)? { get set }
+
+    /// Хук перед подключением для модификации запроса.
+    var beforeConnect: (@Sendable (_ request: URLRequest) async -> URLRequest)? { get set }
+
+    /// Колбэк ошибки апгрейда WebSocket (например, 401).
+    var onUpgradeError: (@Sendable (HTTPURLResponse) -> Void)? { get set }
+
+    /// Колбэк входящего кадра после классификации.
+    var onFrame: (@Sendable (Frame) -> Void)? { get set }
+
+    /// Колбэк входящего полезного сообщения (payload).
+    var onMessage: (@Sendable (_ payload: String) -> Void)? { get set }
+
+    /// Открывает соединение (или планирует переподключение по правилам клиента).
+    func connect()
+
+    /// Закрывает соединение и запрещает автопереподключение.
+    func disconnect()
+
+    /// Отправляет текстовое сообщение или ставит его в очередь до открытия соединения.
+    func send(_ text: String)
+
+    /// Немедленно отправляет клиентский PING кадр.
+    func sendPingNow()
+
+    /// Немедленно отправляет клиентский PONG кадр.
+    func sendPongNow()
+
+    /// Обновляет интервал клиентского PING.
+    func updateClientPingInterval(_ interval: TimeInterval?)
+}
+
 // MARK: - Error UserInfo Keys
 
 /// Ключи для расширения `NSError.userInfo`, используемые клиентом ExtWS.
@@ -39,7 +90,7 @@ import UIKit
 /// - `onUpgradeError`: вызывается при ошибке апгрейда (например, `401`), даёт возможность
 ///   приложению самостоятельно обработать ситуацию (вернуть `true`). Если обработано,
 ///   автопереподключение не запускается.
-public final class ExtWSClient: @unchecked Sendable {
+public final class ExtWSClient: ExtWSClientProtocol, @unchecked Sendable {
 
     // MARK: - Callbacks ()
 
